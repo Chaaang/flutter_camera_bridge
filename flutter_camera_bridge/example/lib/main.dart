@@ -3,8 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import 'camera_connector.dart';
-import 'dslr/dslr_models.dart';
+import 'package:flutter_camera_bridge/flutter_camera_bridge.dart';
 
 void main() {
   runApp(const DslrApp());
@@ -38,8 +37,7 @@ class _DslrHomePageState extends State<DslrHomePage> {
   static const int _pageSize = 30;
   static const Duration _autoPollInterval = Duration(seconds: 8);
 
-  final AndroidPtpCameraConnector _connector =
-      AndroidPtpCameraConnector.instance;
+  final FlutterCameraBridge _connector = FlutterCameraBridge.instance;
   final List<String> _debugLogs = <String>[];
   final ScrollController _gridScrollController = ScrollController();
   final Map<int, Future<Uint8List>> _thumbnailFutures =

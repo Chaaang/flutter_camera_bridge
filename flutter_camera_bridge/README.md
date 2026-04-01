@@ -1,16 +1,31 @@
 # flutter_camera_bridge
 
-A new Flutter project.
+Android Flutter plugin for connecting to supported DSLR cameras over USB OTG/PTP,
+listing images, and loading thumbnails or full image bytes.
 
-## Getting Started
+## Features
 
-This project is a starting point for a Flutter application.
+- Start and stop the DSLR bridge
+- Detect supported camera connection state
+- Listen for DSLR state, debug, and photo-detected events
+- List camera images with paging support
+- Load thumbnail bytes or full image bytes by object handle
 
-A few resources to get you started if this is your first Flutter project:
+## Supported brands
 
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
+- Canon
+- Sony
+- Nikon
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+## Usage
+
+```dart
+final bridge = FlutterCameraBridge.instance;
+
+await bridge.start();
+final info = await bridge.getConnectedDeviceInfo();
+final images = await bridge.listImages(limit: 30, offset: 0);
+final thumb = await bridge.getThumbnailBytes(images.first.handle);
+```
+
+See `example/` for a complete browser app.
