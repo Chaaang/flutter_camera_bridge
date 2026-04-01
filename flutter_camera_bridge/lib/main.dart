@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -48,6 +47,7 @@ class _DslrHomePageState extends State<DslrHomePage> {
   Future<void> _thumbnailQueue = Future<void>.value();
   StreamSubscription<DslrEvent>? _subscription;
   Timer? _autoPollTimer;
+  int _newPhotoSyncToken = 0;
 
   List<CameraStorageItem> _images = <CameraStorageItem>[];
   DslrPhotoEvent? _latestPhoto;
@@ -70,8 +70,9 @@ class _DslrHomePageState extends State<DslrHomePage> {
   void _onGridScroll() {
     if (!_gridScrollController.hasClients ||
         _isLoadingImages ||
-        !_hasMoreImages)
+        !_hasMoreImages) {
       return;
+    }
     final position = _gridScrollController.position;
     if (position.pixels >= position.maxScrollExtent - 280) {
       _loadImages(showSnackbar: false, append: true);
@@ -113,16 +114,22 @@ class _DslrHomePageState extends State<DslrHomePage> {
         if (_debugLogs.length > _maxDebugLines) {
           _debugLogs.removeRange(_maxDebugLines, _debugLogs.length);
         }
+      } else if (event is DslrPhotoDetectedEvent) {
+        _lastError = null;
       } else if (event is DslrPhotoEvent) {
         _latestPhoto = event;
         _lastError = null;
       }
     });
+    if (event is DslrPhotoEvent || event is DslrPhotoDetectedEvent) {
+      _scheduleNewPhotoSync();
+    }
     _syncAutoPollState();
   }
 
   @override
   void dispose() {
+    _newPhotoSyncToken++;
     _subscription?.cancel();
     _autoPollTimer?.cancel();
     _gridScrollController.dispose();
@@ -153,9 +160,7 @@ class _DslrHomePageState extends State<DslrHomePage> {
       setState(() {
         _images = append ? <CameraStorageItem>[..._images, ...images] : images;
         _hasMoreImages = images.length == _pageSize;
-        if (!append) {
-          _thumbnailFutures.clear();
-        }
+        _pruneThumbnailFutures();
       });
       if (showSnackbar) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -174,10 +179,11 @@ class _DslrHomePageState extends State<DslrHomePage> {
         _lastError = 'Failed to load camera images: $e';
       });
     } finally {
-      if (!mounted) return;
-      setState(() {
-        _isLoadingImages = false;
-      });
+      if (mounted) {
+        setState(() {
+          _isLoadingImages = false;
+        });
+      }
     }
   }
 
@@ -208,7 +214,7 @@ class _DslrHomePageState extends State<DslrHomePage> {
           merged.putIfAbsent(item.handle, () => item);
         }
         _images = merged.values.toList();
-        _thumbnailFutures.clear();
+        _pruneThumbnailFutures();
       });
 
       if (mounted) {
@@ -234,6 +240,28 @@ class _DslrHomePageState extends State<DslrHomePage> {
     _autoPollTimer = Timer.periodic(_autoPollInterval, (_) {
       _autoCheckForNewImages();
     });
+  }
+
+  void _scheduleNewPhotoSync() {
+    final int syncToken = ++_newPhotoSyncToken;
+    unawaited(_runNewPhotoSync(syncToken));
+  }
+
+  Future<void> _runNewPhotoSync(int syncToken) async {
+    await Future<void>.delayed(const Duration(milliseconds: 600));
+    if (!mounted || syncToken != _newPhotoSyncToken) return;
+    await _autoCheckForNewImages();
+
+    await Future<void>.delayed(const Duration(seconds: 2));
+    if (!mounted || syncToken != _newPhotoSyncToken) return;
+    await _autoCheckForNewImages();
+  }
+
+  void _pruneThumbnailFutures() {
+    final validHandles = _images.map((e) => e.handle).toSet();
+    _thumbnailFutures.removeWhere(
+      (int handle, Future<Uint8List> _) => !validHandles.contains(handle),
+    );
   }
 
   Future<void> _copyDebugLogsToClipboard() async {
@@ -423,6 +451,7 @@ class _DslrHomePageState extends State<DslrHomePage> {
                             itemBuilder: (BuildContext context, int index) {
                               final item = _images[index];
                               return InkWell(
+                                key: ValueKey<int>(item.handle),
                                 onTap: () => _openImage(item),
                                 child: Card(
                                   clipBehavior: Clip.antiAlias,

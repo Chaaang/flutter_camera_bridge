@@ -23,4 +23,10 @@ object PtpCodes {
 
     const val EC_ObjectAdded = 0x4002
     const val EC_CaptureComplete = 0x400D
+
+    const val EOS_EC_ObjectAdded = 0xC181
+    const val EOS_EC_RequestObjectTransfer = 0xC186
+    const val EOS_EC_RequestObjectTransferDt = 0xC190
+    const val EOS_EC_ObjectAddedEx64 = 0xC1A7
+    const val EOS_EC_RequestObjectTransfer64 = 0xC1A9
 }

@@ -16,3 +16,9 @@ data class PtpObjectInfo(
     val fileName: String,
     val captureDate: String?
 )
+
+data class CanonEosEvent(
+    val code: Int,
+    val sizeBytes: Int,
+    val handle: Int?
+)

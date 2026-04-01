@@ -1,5 +1,4 @@
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -89,6 +88,14 @@ class DslrBridge {
           if (type == 'debug') {
             return DslrDebugEvent(
               payload['message'] as String? ?? 'Unknown DSLR debug event',
+            );
+          }
+          if (type == 'photo_detected') {
+            return DslrPhotoDetectedEvent(
+              handle: (payload['handle'] as num?)?.toInt() ?? -1,
+              brand: payload['brand'] as String? ?? 'Unknown',
+              vendorId: (payload['vendorId'] as num?)?.toInt() ?? -1,
+              productId: (payload['productId'] as num?)?.toInt() ?? -1,
             );
           }
           if (type == 'photo') {

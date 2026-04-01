@@ -10,14 +10,13 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import java.io.File
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicBoolean
 
 class PtpSession(
     private val transport: UsbPtpTransport,
-    private val cacheDir: File,
-    private val onPhotoFile: (File, Int) -> Unit,
+    private val usesCanonEosEvents: Boolean,
+    private val onPhotoDetected: (Int) -> Unit,
     private val onDebug: (String) -> Unit,
     private val onError: (Throwable) -> Unit
 ) {
@@ -28,7 +27,7 @@ class PtpSession(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val running = AtomicBoolean(false)
     private val knownHandles = Collections.synchronizedSet(mutableSetOf<Int>())
-    private val downloadedHandles = Collections.synchronizedSet(mutableSetOf<Int>())
+    private val announcedHandles = Collections.synchronizedSet(mutableSetOf<Int>())
     private val commandQueue = Channel<suspend () -> Unit>(Channel.UNLIMITED)
     private val objectInfoCache = Collections.synchronizedMap(mutableMapOf<Int, PtpObjectInfo>())
 
@@ -58,6 +57,12 @@ class PtpSession(
                 }
                 onDebug("device: $deviceInfo")
                 pauseBetweenUsbOperations()
+                if (usesCanonEosEvents) {
+                    enqueueCommand("ConfigureCanonEosMode") {
+                        transport.configureCanonEosMode()
+                    }
+                    pauseBetweenUsbOperations()
+                }
                 bootstrapKnownHandles()
                 eventLoop()
             } catch (t: Throwable) {
@@ -77,33 +82,54 @@ class PtpSession(
 
     private suspend fun eventLoop() {
         while (running.get() && currentCoroutineContext().isActive) {
-            val event = transport.readEvent(1000) ?: continue
-            if (event.type != PtpCodes.CONTAINER_EVENT) continue
-            onDebug(
-                "event: code=0x${event.code.toString(16).padStart(4, '0')} tx=${event.transactionId} params=${
-                    event.params.joinToString(prefix = "[", postfix = "]") {
-                        "0x${it.toString(16).padStart(4, '0')}"
-                    }
-                }"
-            )
-
-            when (event.code) {
-                PtpCodes.EC_ObjectAdded -> {
-                    val handle = event.params.firstOrNull() ?: continue
-                    try {
-                        onDebug("event:ObjectAdded handle=0x${handle.toString(16).padStart(4, '0')}")
-                        knownHandles.add(handle)
-                        downloadHandleIfNeeded(handle, "event")
-                    } catch (t: Throwable) {
-                        onError(t)
-                    }
+            try {
+                if (usesCanonEosEvents) {
+                    pollCanonEosEvents()
+                } else {
+                    pollStandardPtpEvents()
                 }
-                PtpCodes.EC_CaptureComplete -> {
-                    onDebug("event:CaptureComplete")
-                }
-                else -> onDebug("event:Unhandled code=0x${event.code.toString(16).padStart(4, '0')}")
+            } catch (t: Throwable) {
+                onError(t)
             }
             pauseBetweenUsbOperations()
+        }
+    }
+
+    private suspend fun pollStandardPtpEvents() {
+        val event = transport.readEvent(1000) ?: return
+        if (event.type != PtpCodes.CONTAINER_EVENT) return
+        onDebug(
+            "event: code=0x${event.code.toString(16).padStart(4, '0')} tx=${event.transactionId} params=${
+                event.params.joinToString(prefix = "[", postfix = "]") {
+                    "0x${it.toString(16).padStart(4, '0')}"
+                }
+            }"
+        )
+
+        when (event.code) {
+            PtpCodes.EC_ObjectAdded -> {
+                val handle = event.params.firstOrNull() ?: return
+                onDebug("event:ObjectAdded handle=0x${handle.toString(16).padStart(4, '0')}")
+                announceHandleIfNeeded(handle, "event")
+            }
+            PtpCodes.EC_CaptureComplete -> {
+                onDebug("event:CaptureComplete")
+            }
+            else -> onDebug("event:Unhandled code=0x${event.code.toString(16).padStart(4, '0')}")
+        }
+    }
+
+    private suspend fun pollCanonEosEvents() {
+        val events = enqueueCommand("EOSGetEvent") {
+            transport.pollCanonEosEvents()
+        }
+        for (event in events) {
+            onDebug(
+                "canon:event code=0x${event.code.toString(16).padStart(4, '0')} " +
+                    "size=${event.sizeBytes} handle=${event.handle ?: "-"}"
+            )
+            val handle = event.handle ?: continue
+            announceHandleIfNeeded(handle, "canon")
         }
     }
 
@@ -127,20 +153,15 @@ class PtpSession(
         pauseBetweenUsbOperations()
     }
 
-    private suspend fun downloadHandleIfNeeded(handle: Int, source: String) {
-        if (!downloadedHandles.add(handle)) {
-            onDebug("$source: handle already downloaded 0x${handle.toString(16).padStart(4, '0')}")
+    private fun announceHandleIfNeeded(handle: Int, source: String) {
+        if (!announcedHandles.add(handle)) {
+            onDebug("$source: handle already announced 0x${handle.toString(16).padStart(4, '0')}")
             return
         }
-        val file = File(cacheDir, "ptp_${System.currentTimeMillis()}_$handle.jpg")
-        enqueueCommand("GetObject[$source]") {
-            transport.getObjectToFile(handle, file)
-        }
-        pauseBetweenUsbOperations()
-        onDebug(
-            "download:$source handle=0x${handle.toString(16).padStart(4, '0')} bytes=${file.length()}"
-        )
-        onPhotoFile(file, handle)
+        knownHandles.add(handle)
+        objectInfoCache.remove(handle)
+        onDebug("$source: new handle 0x${handle.toString(16).padStart(4, '0')}")
+        onPhotoDetected(handle)
     }
 
     suspend fun listImages(): List<Map<String, Any?>> {

@@ -75,6 +75,20 @@ class DslrDebugEvent extends DslrEvent {
   final String message;
 }
 
+class DslrPhotoDetectedEvent extends DslrEvent {
+  const DslrPhotoDetectedEvent({
+    required this.handle,
+    required this.brand,
+    required this.vendorId,
+    required this.productId,
+  });
+
+  final int handle;
+  final String brand;
+  final int vendorId;
+  final int productId;
+}
+
 class DslrPhotoEvent extends DslrEvent {
   const DslrPhotoEvent({
     required this.handle,

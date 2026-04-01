@@ -378,6 +378,29 @@ class UsbPtpTransport(
         return configured
     }
 
+    fun pollCanonEosEvents(): List<CanonEosEvent> {
+        val tx = nextTxId()
+        debug("cmd: EOSGetEvent tx=$tx")
+        sendCommand(PtpCodes.OC_EOSGetEvent, tx)
+
+        val (payload, response) = readMaybeDataAndResponse(2500)
+        require(response.type == PtpCodes.CONTAINER_RESPONSE) {
+            "EOSGetEvent expected RESPONSE container"
+        }
+        require(response.code == PtpCodes.RC_OK) {
+            "EOSGetEvent failed with code 0x${response.code.toHex()}"
+        }
+
+        if (payload == null || payload.isEmpty()) {
+            debug("data: EOSGetEvent tx=$tx empty")
+            return emptyList()
+        }
+
+        val events = parseCanonEosEvents(payload)
+        debug("data: EOSGetEvent tx=$tx events=${events.size}")
+        return events
+    }
+
     private fun writeBulk(bytes: ByteArray, timeoutMs: Int) {
         val conn = requireNotNull(connection)
         val endpoint = requireNotNull(bulkOut)
@@ -430,6 +453,33 @@ class UsbPtpTransport(
                 "respType=${responseContainer.type} respCode=0x${responseContainer.code.toHex()}"
         )
         return Triple(dataContainer, payload, responseContainer)
+    }
+
+    private fun readMaybeDataAndResponse(timeoutMs: Int): Pair<ByteArray?, PtpContainer> {
+        val endpoint = requireNotNull(bulkIn)
+        val firstRaw = readRawContainer(endpoint, timeoutMs)
+        val first = parseContainer(firstRaw)
+        if (first.type == PtpCodes.CONTAINER_RESPONSE) {
+            debug("rsp1: respType=${first.type} respCode=0x${first.code.toHex()} (no data)")
+            return null to first
+        }
+
+        require(first.type == PtpCodes.CONTAINER_DATA) {
+            "Expected DATA or RESPONSE container, got type=${first.type}"
+        }
+
+        val secondRaw = readRawContainer(endpoint, timeoutMs)
+        val second = parseContainer(secondRaw)
+        require(second.type == PtpCodes.CONTAINER_RESPONSE) {
+            "Expected RESPONSE container after DATA, got type=${second.type}"
+        }
+
+        val payload = if (firstRaw.size > 12) firstRaw.copyOfRange(12, firstRaw.size) else ByteArray(0)
+        debug(
+            "rsp2: dataType=${first.type} dataCode=0x${first.code.toHex()} " +
+                "respType=${second.type} respCode=0x${second.code.toHex()}"
+        )
+        return payload to second
     }
 
     private fun transferObjectBytes(opCode: Int, handle: Int, label: String): ByteArray {
@@ -504,6 +554,35 @@ class UsbPtpTransport(
             params[idx] = bb.int
         }
         return PtpContainer(length, type, code, transactionId, params)
+    }
+
+    private fun parseCanonEosEvents(payload: ByteArray): List<CanonEosEvent> {
+        val events = mutableListOf<CanonEosEvent>()
+        var offset = 0
+        while (offset + 8 <= payload.size) {
+            val recordSize = leInt(payload, offset)
+            if (recordSize < 8 || offset + recordSize > payload.size) {
+                debug("canon: invalid EOS event record size=$recordSize at offset=$offset")
+                break
+            }
+
+            val code = leInt(payload, offset + 4)
+            val handle =
+                when (code) {
+                    PtpCodes.EOS_EC_ObjectAdded,
+                    PtpCodes.EOS_EC_RequestObjectTransfer,
+                    PtpCodes.EOS_EC_RequestObjectTransferDt,
+                    PtpCodes.EOS_EC_ObjectAddedEx64,
+                    PtpCodes.EOS_EC_RequestObjectTransfer64 -> {
+                        if (recordSize >= 12) leInt(payload, offset + 8) else null
+                    }
+                    else -> null
+                }
+
+            events.add(CanonEosEvent(code = code, sizeBytes = recordSize, handle = handle))
+            offset += recordSize
+        }
+        return events
     }
 
     private fun readPtpString(data: ByteArray, offset: Int): Pair<String, Int> {

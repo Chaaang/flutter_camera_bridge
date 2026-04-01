@@ -10,6 +10,7 @@ import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.os.Build
 import android.util.Log
+import com.example.flutter_camera_bridge.dslr.ptp.PtpSession
 import com.example.flutter_camera_bridge.dslr.ptp.UsbPtpTransport
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -42,6 +43,7 @@ class DslrUsbController(
     private var connectedBrand: String? = null
     private val operationMutex = Mutex()
     private var periodicScanJob: Job? = null
+    private var liveSession: PtpSession? = null
 
     private val permissionIntent: PendingIntent by lazy {
         PendingIntent.getBroadcast(
@@ -144,6 +146,9 @@ class DslrUsbController(
     suspend fun listImages(limit: Int = 30, offset: Int = 0): List<Map<String, Any?>> {
         val safeLimit = limit.coerceIn(1, 100)
         val safeOffset = offset.coerceAtLeast(0)
+        liveSession?.let { session ->
+            return session.listImages().drop(safeOffset).take(safeLimit)
+        }
         return withTemporarySession { transport ->
             val storageIds = transport.getStorageIds()
             val newestCandidates = mutableListOf<Pair<Int, Int>>()
@@ -194,12 +199,18 @@ class DslrUsbController(
     }
 
     suspend fun getThumbnailBytes(handle: Int): ByteArray {
+        liveSession?.let { session ->
+            return session.getThumbnailBytes(handle)
+        }
         return withTemporarySession { transport ->
             transport.getThumbBytes(handle)
         }
     }
 
     suspend fun getImageBytes(handle: Int): ByteArray {
+        liveSession?.let { session ->
+            return session.getImageBytes(handle)
+        }
         return withTemporarySession { transport ->
             transport.getObjectBytes(handle)
         }
@@ -294,13 +305,15 @@ class DslrUsbController(
         cancelPeriodicScan()
         emitState("connecting")
         emitDebug("connect: ready brand=$connectedBrand vendor=0x${device.vendorId.toString(16)} product=0x${device.productId.toString(16)}")
+        startLiveSessionIfNeeded(device)
         emitState("connected")
-        emitDebug("connect: camera ready for short-lived sessions")
+        emitDebug("connect: camera ready")
         isConnecting.set(false)
     }
 
     private fun disconnect() {
         isConnecting.set(false)
+        stopLiveSession()
         emitDebug("disconnect: session cleared")
     }
 
@@ -346,6 +359,19 @@ class DslrUsbController(
         Log.d(logTag, message)
     }
 
+    private fun emitPhotoDetected(handle: Int) {
+        val device = connectedDevice ?: return
+        emit(
+            mapOf(
+                "type" to "photo_detected",
+                "handle" to handle,
+                "brand" to (connectedBrand ?: brandForVendor(device.vendorId)),
+                "vendorId" to device.vendorId,
+                "productId" to device.productId
+            )
+        )
+    }
+
     private fun isPtpCamera(device: UsbDevice): Boolean {
         for (i in 0 until device.interfaceCount) {
             val iface = device.getInterface(i)
@@ -372,6 +398,39 @@ class DslrUsbController(
             @Suppress("DEPRECATION")
             getParcelableExtra(UsbManager.EXTRA_DEVICE)
         }
+    }
+
+    private fun startLiveSessionIfNeeded(device: UsbDevice) {
+        stopLiveSession()
+        if (device.vendorId != 0x04A9) {
+            emitDebug("connect: using short-lived sessions for this camera")
+            return
+        }
+
+        emitDebug("connect: starting Canon EOS live session")
+        val transport = UsbPtpTransport(usbManager, device) { msg ->
+            emitDebug(msg)
+        }
+        val session = PtpSession(
+            transport = transport,
+            usesCanonEosEvents = true,
+            onPhotoDetected = { handle ->
+                emitPhotoDetected(handle)
+            },
+            onDebug = { message ->
+                emitDebug(message)
+            },
+            onError = { error ->
+                emitDebug("live-session error: ${error.message ?: error.javaClass.simpleName}")
+            }
+        )
+        liveSession = session
+        session.start()
+    }
+
+    private fun stopLiveSession() {
+        liveSession?.stop()
+        liveSession = null
     }
 
     private suspend fun <T> withTemporarySession(block: suspend (UsbPtpTransport) -> T): T {
