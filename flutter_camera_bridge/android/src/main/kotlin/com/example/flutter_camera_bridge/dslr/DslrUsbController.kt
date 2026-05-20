@@ -10,6 +10,8 @@ import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.os.Build
 import android.util.Log
+import com.example.flutter_camera_bridge.dslr.ptp.PtpCodes
+import com.example.flutter_camera_bridge.dslr.ptp.PtpResponseException
 import com.example.flutter_camera_bridge.dslr.ptp.PtpSession
 import com.example.flutter_camera_bridge.dslr.ptp.UsbPtpTransport
 import kotlinx.coroutines.CoroutineScope
@@ -150,17 +152,7 @@ class DslrUsbController(
             return session.listImages().drop(safeOffset).take(safeLimit)
         }
         return withTemporarySession { transport ->
-            val storageIds = transport.getStorageIds()
-            val newestCandidates = mutableListOf<Pair<Int, Int>>()
-            for (storageId in storageIds) {
-                pauseBetweenUsbOperations()
-                val handles = transport.getObjectHandlesForStorage(storageId)
-                emitDebug("gallery: storage=0x${storageId.toString(16)} handles=${handles.size}")
-                // Most cameras report handles in capture order (oldest -> newest).
-                handles.asReversed().forEach { handle ->
-                    newestCandidates.add(storageId to handle)
-                }
-            }
+            val newestCandidates = listObjectHandleCandidates(transport)
             if (newestCandidates.isEmpty()) {
                 emitDebug("gallery: no handles found across all storages")
                 return@withTemporarySession emptyList<Map<String, Any?>>()
@@ -453,6 +445,10 @@ class DslrUsbController(
                     emitDebug("canon: configuring EOS mode")
                     transport.configureCanonEosMode()
                     pauseBetweenUsbOperations()
+                } else if (device.vendorId == 0x054C) {
+                    emitDebug("sony: configuring SDIO mode")
+                    transport.configureSonyMode()
+                    pauseBetweenUsbOperations()
                 }
                 block(transport)
             } finally {
@@ -462,6 +458,62 @@ class DslrUsbController(
                 emitDebug("temp-session: closed")
             }
         }
+    }
+
+    private suspend fun listObjectHandleCandidates(
+        transport: UsbPtpTransport
+    ): List<Pair<Int, Int>> {
+        val storageIds = transport.getStorageIds()
+        val newestCandidates = mutableListOf<Pair<Int, Int>>()
+        for (storageId in storageIds) {
+            pauseBetweenUsbOperations()
+            val handles = try {
+                transport.getObjectHandlesForStorage(storageId)
+            } catch (error: Throwable) {
+                if (error.isStoreNotAvailable()) {
+                    emitDebug(
+                        "gallery: storage=0x${storageId.toString(16)} unavailable; skipping"
+                    )
+                    emptyList()
+                } else {
+                    throw error
+                }
+            }
+            emitDebug("gallery: storage=0x${storageId.toString(16)} handles=${handles.size}")
+            // Most cameras report handles in capture order (oldest -> newest).
+            handles.asReversed().forEach { handle ->
+                newestCandidates.add(storageId to handle)
+            }
+        }
+
+        if (newestCandidates.isNotEmpty()) {
+            return newestCandidates
+        }
+
+        emitDebug(
+            "gallery: no handles from ${storageIds.size} storage(s); trying all-storage fallback"
+        )
+        pauseBetweenUsbOperations()
+        val fallbackStorageId = 0xFFFFFFFF.toInt()
+        val fallbackHandles = try {
+            transport.getObjectHandlesForStorage(fallbackStorageId)
+        } catch (error: Throwable) {
+            if (error.isStoreNotAvailable()) {
+                emitDebug("gallery: all-storage fallback unavailable; returning empty list")
+                return emptyList()
+            } else {
+                throw error
+            }
+        }
+        emitDebug("gallery: all-storage fallback handles=${fallbackHandles.size}")
+        fallbackHandles.asReversed().forEach { handle ->
+            newestCandidates.add(fallbackStorageId to handle)
+        }
+        return newestCandidates
+    }
+
+    private fun Throwable.isStoreNotAvailable(): Boolean {
+        return this is PtpResponseException && responseCode == PtpCodes.RC_StoreNotAvailable
     }
 
     private suspend fun pauseBetweenUsbOperations() {
@@ -476,6 +528,7 @@ class DslrUsbController(
             lowered.endsWith(".jpeg") ||
             lowered.endsWith(".png") ||
             lowered.endsWith(".cr2") ||
-            lowered.endsWith(".cr3")
+            lowered.endsWith(".cr3") ||
+            lowered.endsWith(".arw")
     }
 }

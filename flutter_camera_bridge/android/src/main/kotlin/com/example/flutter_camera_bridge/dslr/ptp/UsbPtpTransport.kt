@@ -13,6 +13,11 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicInteger
 
+class PtpResponseException(
+    val operation: String,
+    val responseCode: Int
+) : IllegalStateException("$operation failed with code=0x${responseCode.toString(16)}")
+
 class UsbPtpTransport(
     private val usbManager: UsbManager,
     private val device: UsbDevice,
@@ -266,23 +271,21 @@ class UsbPtpTransport(
         debug("cmd: GetObjectHandles tx=$tx storage=0x${storageId.toHex()}")
         sendCommand(PtpCodes.OC_GetObjectHandles, tx, params)
 
-        val (dataContainer, payload, response) = readDataAndResponse(5000)
-        require(dataContainer.type == PtpCodes.CONTAINER_DATA) {
-            "GetObjectHandles expected DATA container"
-        }
+        val (payload, response) = readMaybeDataAndResponse(5000)
         require(response.type == PtpCodes.CONTAINER_RESPONSE) {
             "GetObjectHandles expected RESPONSE container"
         }
-        require(response.code == PtpCodes.RC_OK) {
-            "GetObjectHandles failed with code=0x${response.code.toHex()}"
+        if (response.code != PtpCodes.RC_OK) {
+            throw PtpResponseException("GetObjectHandles", response.code)
         }
 
-        if (payload.size < 4) {
+        val objectHandlePayload = payload ?: ByteArray(0)
+        if (objectHandlePayload.size < 4) {
             debug("data: GetObjectHandles empty payload")
             return emptyList()
         }
 
-        val bb = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN)
+        val bb = ByteBuffer.wrap(objectHandlePayload).order(ByteOrder.LITTLE_ENDIAN)
         val count = bb.int.coerceAtLeast(0)
         val handles = ArrayList<Int>(count)
         repeat(count) {
@@ -375,6 +378,35 @@ class UsbPtpTransport(
         }
         val configured = remoteOk && eventOk
         debug("canon: eos-mode configured=$configured keepAlive=$keepAliveOk")
+        return configured
+    }
+
+    fun configureSonyMode(): Boolean {
+        val step1Ok = runSonySetupStep(
+            label = "SDIOConnect[1]",
+            opCode = PtpCodes.OC_SONYSDIOConnect,
+            params = intArrayOf(1, 0, 0)
+        )
+        val step2Ok = runSonySetupStep(
+            label = "SDIOConnect[2]",
+            opCode = PtpCodes.OC_SONYSDIOConnect,
+            params = intArrayOf(2, 0, 0)
+        )
+        val extInfoOk = runSonySetupStep(
+            label = "SDIOGetExtDeviceInfo",
+            opCode = PtpCodes.OC_SONYSDIOGetExtDeviceInfo,
+            params = intArrayOf(0xC8)
+        )
+        val step3Ok = runSonySetupStep(
+            label = "SDIOConnect[3]",
+            opCode = PtpCodes.OC_SONYSDIOConnect,
+            params = intArrayOf(3, 0, 0)
+        )
+        val configured = step1Ok && step2Ok && extInfoOk && step3Ok
+        debug(
+            "sony: sdio-mode configured=$configured " +
+                "step1=$step1Ok step2=$step2Ok extInfo=$extInfoOk step3=$step3Ok"
+        )
         return configured
     }
 
@@ -539,6 +571,41 @@ class UsbPtpTransport(
         val ok = response.type == PtpCodes.CONTAINER_RESPONSE && response.code == PtpCodes.RC_OK
         debug("rsp: $label tx=$tx code=0x${response.code.toHex()} ok=$ok")
         return ok
+    }
+
+    private fun transactMaybeDataCommand(
+        opCode: Int,
+        label: String,
+        params: IntArray = intArrayOf(),
+        timeoutMs: Int = 5000
+    ): Boolean {
+        val tx = nextTxId()
+        debug("cmd: $label tx=$tx")
+        sendCommand(opCode, tx, params)
+        val (payload, response) = readMaybeDataAndResponse(timeoutMs)
+        val ok = response.type == PtpCodes.CONTAINER_RESPONSE && response.code == PtpCodes.RC_OK
+        debug(
+            "rsp: $label tx=$tx code=0x${response.code.toHex()} ok=$ok " +
+                "dataBytes=${payload?.size ?: 0}"
+        )
+        return ok
+    }
+
+    private fun runSonySetupStep(
+        label: String,
+        opCode: Int,
+        params: IntArray
+    ): Boolean {
+        return runCatching {
+            transactMaybeDataCommand(
+                opCode = opCode,
+                label = label,
+                params = params
+            )
+        }.getOrElse { error ->
+            debug("sony: $label failed: ${error.message}")
+            false
+        }
     }
 
     private fun parseContainer(raw: ByteArray): PtpContainer {

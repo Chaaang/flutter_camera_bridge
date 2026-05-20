@@ -18,8 +18,11 @@ object PtpCodes {
     const val OC_EOSSetEventMode = 0x9115
     const val OC_EOSGetEvent = 0x9116
     const val OC_EOSKeepDeviceOn = 0x911D
+    const val OC_SONYSDIOConnect = 0x9201
+    const val OC_SONYSDIOGetExtDeviceInfo = 0x9202
 
     const val RC_OK = 0x2001
+    const val RC_StoreNotAvailable = 0x2013
 
     const val EC_ObjectAdded = 0x4002
     const val EC_CaptureComplete = 0x400D
