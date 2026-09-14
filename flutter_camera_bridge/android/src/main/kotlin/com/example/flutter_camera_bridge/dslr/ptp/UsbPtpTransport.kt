@@ -378,6 +378,48 @@ class UsbPtpTransport(
         return configured
     }
 
+    fun configureSonySdioMode(): Boolean {
+        val step1Ok = runCatching {
+            transactNoDataCommand(
+                opCode = PtpCodes.OC_SonySdioConnect,
+                label = "SonySDIOConnect[1]",
+                params = intArrayOf(1, 0, 0)
+            )
+        }.getOrElse { error ->
+            debug("sony: SDIOConnect step 1 failed: ${error.message}")
+            false
+        }
+        val step2Ok = runCatching {
+            transactNoDataCommand(
+                opCode = PtpCodes.OC_SonySdioConnect,
+                label = "SonySDIOConnect[2]",
+                params = intArrayOf(2, 0, 0)
+            )
+        }.getOrElse { error ->
+            debug("sony: SDIOConnect step 2 failed: ${error.message}")
+            false
+        }
+        val extInfoOk = runCatching {
+            transactSonySdioGetExtDeviceInfo()
+        }.getOrElse { error ->
+            debug("sony: SDIOGetExtDeviceInfo failed: ${error.message}")
+            false
+        }
+        val step3Ok = runCatching {
+            transactNoDataCommand(
+                opCode = PtpCodes.OC_SonySdioConnect,
+                label = "SonySDIOConnect[3]",
+                params = intArrayOf(3, 0, 0)
+            )
+        }.getOrElse { error ->
+            debug("sony: SDIOConnect step 3 failed: ${error.message}")
+            false
+        }
+        val configured = step1Ok && step2Ok && extInfoOk && step3Ok
+        debug("sony: sdio-mode configured=$configured")
+        return configured
+    }
+
     fun pollCanonEosEvents(): List<CanonEosEvent> {
         val tx = nextTxId()
         debug("cmd: EOSGetEvent tx=$tx")
@@ -524,6 +566,23 @@ class UsbPtpTransport(
         }
         debug("data: $label tx=$tx handle=0x${handle.toHex()} bytes=${output.size()}")
         return output.toByteArray()
+    }
+
+    private fun transactSonySdioGetExtDeviceInfo(): Boolean {
+        val tx = nextTxId()
+        debug("cmd: SonySDIOGetExtDeviceInfo tx=$tx")
+        sendCommand(
+            PtpCodes.OC_SonySdioGetExtDeviceInfo,
+            tx,
+            intArrayOf(PtpCodes.SONY_EXT_DEVICE_INFO_VERSION)
+        )
+        val (payload, response) = readMaybeDataAndResponse(5000)
+        val ok = response.type == PtpCodes.CONTAINER_RESPONSE && response.code == PtpCodes.RC_OK
+        debug(
+            "rsp: SonySDIOGetExtDeviceInfo tx=$tx code=0x${response.code.toHex()} " +
+                "ok=$ok payload=${payload?.size ?: 0}"
+        )
+        return ok
     }
 
     private fun transactNoDataCommand(

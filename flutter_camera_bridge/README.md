@@ -13,9 +13,13 @@ listing images, and loading thumbnails or full image bytes.
 
 ## Supported brands
 
-- Canon
-- Sony
-- Nikon
+- Canon (EOS remote events)
+- Sony (USB PTP / PC Remote SDIO handshake)
+- Nikon (detection only; live session not implemented)
+
+For Sony, set the camera USB mode to **PC Remote** (or **MTP** on older bodies).
+PC Remote cameras require the plugin’s SDIO handshake before gallery and
+photo-detect work reliably.
 
 ## Usage
 

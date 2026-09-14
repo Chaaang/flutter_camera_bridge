@@ -16,5 +16,6 @@ void main() {
 
   testWidgets('plugin exports supported DSLR brands', (WidgetTester tester) async {
     expect(FlutterCameraBridge.supportedBrands, contains('Canon'));
+    expect(FlutterCameraBridge.supportedBrands, contains('Sony'));
   });
 }

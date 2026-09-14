@@ -15,7 +15,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 class PtpSession(
     private val transport: UsbPtpTransport,
-    private val usesCanonEosEvents: Boolean,
+    private val vendorProfile: CameraVendorProfile,
     private val onPhotoDetected: (Int) -> Unit,
     private val onDebug: (String) -> Unit,
     private val onError: (Throwable) -> Unit
@@ -52,12 +52,22 @@ class PtpSession(
                 }
                 onDebug("session: opened")
                 pauseBetweenUsbOperations()
+                when (vendorProfile) {
+                    CameraVendorProfile.SonySdio -> {
+                        enqueueCommand("ConfigureSonySdioMode") {
+                            transport.configureSonySdioMode()
+                        }
+                        pauseBetweenUsbOperations()
+                    }
+                    CameraVendorProfile.CanonEos,
+                    CameraVendorProfile.Standard -> Unit
+                }
                 val deviceInfo = enqueueCommand("GetDeviceInfo") {
                     transport.getDeviceInfoSummary()
                 }
                 onDebug("device: $deviceInfo")
                 pauseBetweenUsbOperations()
-                if (usesCanonEosEvents) {
+                if (vendorProfile == CameraVendorProfile.CanonEos) {
                     enqueueCommand("ConfigureCanonEosMode") {
                         transport.configureCanonEosMode()
                     }
@@ -83,7 +93,7 @@ class PtpSession(
     private suspend fun eventLoop() {
         while (running.get() && currentCoroutineContext().isActive) {
             try {
-                if (usesCanonEosEvents) {
+                if (vendorProfile == CameraVendorProfile.CanonEos) {
                     pollCanonEosEvents()
                 } else {
                     pollStandardPtpEvents()
@@ -107,10 +117,19 @@ class PtpSession(
         )
 
         when (event.code) {
-            PtpCodes.EC_ObjectAdded -> {
+            PtpCodes.EC_ObjectAdded, PtpCodes.EC_SonyObjectAdded -> {
                 val handle = event.params.firstOrNull() ?: return
                 onDebug("event:ObjectAdded handle=0x${handle.toString(16).padStart(4, '0')}")
                 announceHandleIfNeeded(handle, "event")
+            }
+            PtpCodes.EC_SonyObjectRemoved -> {
+                val handle = event.params.firstOrNull()
+                onDebug(
+                    "event:SonyObjectRemoved handle=${handle?.let { "0x${it.toString(16).padStart(4, '0')}" } ?: "-"}"
+                )
+            }
+            PtpCodes.EC_SonyPropertyChanged -> {
+                onDebug("event:SonyPropertyChanged")
             }
             PtpCodes.EC_CaptureComplete -> {
                 onDebug("event:CaptureComplete")
@@ -154,6 +173,10 @@ class PtpSession(
     }
 
     private fun announceHandleIfNeeded(handle: Int, source: String) {
+        if (PtpCodes.isSonyVirtualObjectHandle(handle)) {
+            onDebug("$source: ignoring Sony virtual handle 0x${handle.toString(16)}")
+            return
+        }
         if (!announcedHandles.add(handle)) {
             onDebug("$source: handle already announced 0x${handle.toString(16).padStart(4, '0')}")
             return

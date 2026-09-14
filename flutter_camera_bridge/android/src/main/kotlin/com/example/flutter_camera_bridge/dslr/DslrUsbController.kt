@@ -10,6 +10,7 @@ import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.os.Build
 import android.util.Log
+import com.example.flutter_camera_bridge.dslr.ptp.CameraVendorProfile
 import com.example.flutter_camera_bridge.dslr.ptp.PtpSession
 import com.example.flutter_camera_bridge.dslr.ptp.UsbPtpTransport
 import kotlinx.coroutines.CoroutineScope
@@ -402,18 +403,19 @@ class DslrUsbController(
 
     private fun startLiveSessionIfNeeded(device: UsbDevice) {
         stopLiveSession()
-        if (device.vendorId != 0x04A9) {
+        val profile = CameraVendorProfile.forVendorId(device.vendorId)
+        if (profile == CameraVendorProfile.Standard) {
             emitDebug("connect: using short-lived sessions for this camera")
             return
         }
 
-        emitDebug("connect: starting Canon EOS live session")
+        emitDebug("connect: starting ${profile.name} live session")
         val transport = UsbPtpTransport(usbManager, device) { msg ->
             emitDebug(msg)
         }
         val session = PtpSession(
             transport = transport,
-            usesCanonEosEvents = true,
+            vendorProfile = profile,
             onPhotoDetected = { handle ->
                 emitPhotoDetected(handle)
             },
@@ -449,10 +451,18 @@ class DslrUsbController(
                 pauseBetweenUsbOperations()
                 transport.openSession(1)
                 pauseBetweenUsbOperations()
-                if (device.vendorId == 0x04A9) {
-                    emitDebug("canon: configuring EOS mode")
-                    transport.configureCanonEosMode()
-                    pauseBetweenUsbOperations()
+                when (CameraVendorProfile.forVendorId(device.vendorId)) {
+                    CameraVendorProfile.CanonEos -> {
+                        emitDebug("canon: configuring EOS mode")
+                        transport.configureCanonEosMode()
+                        pauseBetweenUsbOperations()
+                    }
+                    CameraVendorProfile.SonySdio -> {
+                        emitDebug("sony: configuring SDIO mode")
+                        transport.configureSonySdioMode()
+                        pauseBetweenUsbOperations()
+                    }
+                    CameraVendorProfile.Standard -> Unit
                 }
                 block(transport)
             } finally {
@@ -476,6 +486,8 @@ class DslrUsbController(
             lowered.endsWith(".jpeg") ||
             lowered.endsWith(".png") ||
             lowered.endsWith(".cr2") ||
-            lowered.endsWith(".cr3")
+            lowered.endsWith(".cr3") ||
+            lowered.endsWith(".arw") ||
+            lowered.endsWith(".arq")
     }
 }

@@ -19,6 +19,9 @@ object PtpCodes {
     const val OC_EOSGetEvent = 0x9116
     const val OC_EOSKeepDeviceOn = 0x911D
 
+    const val OC_SonySdioConnect = 0x9201
+    const val OC_SonySdioGetExtDeviceInfo = 0x9202
+
     const val RC_OK = 0x2001
 
     const val EC_ObjectAdded = 0x4002
@@ -29,4 +32,15 @@ object PtpCodes {
     const val EOS_EC_RequestObjectTransferDt = 0xC190
     const val EOS_EC_ObjectAddedEx64 = 0xC1A7
     const val EOS_EC_RequestObjectTransfer64 = 0xC1A9
+
+    const val EC_SonyObjectAdded = 0xC201
+    const val EC_SonyObjectRemoved = 0xC202
+    const val EC_SonyPropertyChanged = 0xC203
+
+    const val SONY_EXT_DEVICE_INFO_VERSION = 0xC8
+
+    fun isSonyVirtualObjectHandle(handle: Int): Boolean {
+        val unsigned = handle.toLong() and 0xFFFFFFFFL
+        return unsigned == 0xFFFFC001L || unsigned == 0xFFFFC002L
+    }
 }

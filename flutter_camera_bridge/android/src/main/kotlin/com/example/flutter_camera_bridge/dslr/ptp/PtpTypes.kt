@@ -22,3 +22,19 @@ data class CanonEosEvent(
     val sizeBytes: Int,
     val handle: Int?
 )
+
+enum class CameraVendorProfile {
+    CanonEos,
+    SonySdio,
+    Standard;
+
+    companion object {
+        fun forVendorId(vendorId: Int): CameraVendorProfile {
+            return when (vendorId) {
+                0x04A9 -> CanonEos
+                0x054C -> SonySdio
+                else -> Standard
+            }
+        }
+    }
+}
