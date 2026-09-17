@@ -23,6 +23,25 @@ object PtpCodes {
     const val OC_SonySdioGetExtDeviceInfo = 0x9202
 
     const val RC_OK = 0x2001
+    const val RC_GeneralError = 0x2002
+    const val RC_SessionNotOpen = 0x2003
+    const val RC_OperationNotSupported = 0x2005
+    const val RC_DeviceBusy = 0x2019
+    const val RC_SessionAlreadyOpen = 0x201E
+
+    fun responseName(code: Int): String {
+        val hex = "0x${code.toString(16).padStart(4, '0')}"
+        val name = when (code) {
+            RC_OK -> "OK"
+            RC_GeneralError -> "GeneralError"
+            RC_SessionNotOpen -> "SessionNotOpen"
+            RC_OperationNotSupported -> "OperationNotSupported"
+            RC_DeviceBusy -> "DeviceBusy"
+            RC_SessionAlreadyOpen -> "SessionAlreadyOpen"
+            else -> "Unknown"
+        }
+        return "$hex ($name)"
+    }
 
     const val EC_ObjectAdded = 0x4002
     const val EC_CaptureComplete = 0x400D

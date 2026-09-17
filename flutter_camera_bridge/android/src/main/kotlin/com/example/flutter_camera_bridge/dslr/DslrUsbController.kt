@@ -306,10 +306,20 @@ class DslrUsbController(
         cancelPeriodicScan()
         emitState("connecting")
         emitDebug("connect: ready brand=$connectedBrand vendor=0x${device.vendorId.toString(16)} product=0x${device.productId.toString(16)}")
-        startLiveSessionIfNeeded(device)
-        emitState("connected")
-        emitDebug("connect: camera ready")
-        isConnecting.set(false)
+        val session = startLiveSessionIfNeeded(device)
+        scope.launch {
+            try {
+                session?.awaitReady()
+                if (!isStarted.get() || connectedDevice != device) return@launch
+                emitState("connected")
+                emitDebug("connect: camera ready")
+            } catch (error: Throwable) {
+                emitDebug("connect: session failed ${error.message ?: error.javaClass.simpleName}")
+                emitError(error.message ?: "Failed to open camera session")
+            } finally {
+                isConnecting.set(false)
+            }
+        }
     }
 
     private fun disconnect() {
@@ -401,12 +411,12 @@ class DslrUsbController(
         }
     }
 
-    private fun startLiveSessionIfNeeded(device: UsbDevice) {
+    private fun startLiveSessionIfNeeded(device: UsbDevice): PtpSession? {
         stopLiveSession()
         val profile = CameraVendorProfile.forVendorId(device.vendorId)
         if (profile == CameraVendorProfile.Standard) {
             emitDebug("connect: using short-lived sessions for this camera")
-            return
+            return null
         }
 
         emitDebug("connect: starting ${profile.name} live session")
@@ -428,6 +438,7 @@ class DslrUsbController(
         )
         liveSession = session
         session.start()
+        return session
     }
 
     private fun stopLiveSession() {
@@ -459,7 +470,8 @@ class DslrUsbController(
                     }
                     CameraVendorProfile.SonySdio -> {
                         emitDebug("sony: configuring SDIO mode")
-                        transport.configureSonySdioMode()
+                        val configured = transport.configureSonySdioMode()
+                        require(configured) { "Sony SDIO authentication failed" }
                         pauseBetweenUsbOperations()
                     }
                     CameraVendorProfile.Standard -> Unit

@@ -77,13 +77,18 @@ class UsbPtpTransport(
     fun nextTxId(): Int = txId.getAndIncrement()
 
     fun openSession(sessionId: Int = 1) {
-        val tx = nextTxId()
+        // PTP requires TransactionID 0 for OpenSession (same as sequoia-ptpy).
+        val tx = 0
         debug("cmd: OpenSession tx=$tx sessionId=$sessionId")
         sendCommand(PtpCodes.OC_OpenSession, tx, intArrayOf(sessionId))
         val response = readResponse(5000)
         debug("rsp: OpenSession tx=$tx code=0x${response.code.toHex()} type=${response.type}")
+        if (response.code == PtpCodes.RC_SessionAlreadyOpen) {
+            debug("rsp: OpenSession already open")
+            return
+        }
         require(response.code == PtpCodes.RC_OK) {
-            "OpenSession failed with code 0x${response.code.toString(16)}"
+            "OpenSession failed with ${PtpCodes.responseName(response.code)}"
         }
     }
 
@@ -232,18 +237,14 @@ class UsbPtpTransport(
         debug("cmd: GetStorageIDs tx=$tx")
         sendCommand(PtpCodes.OC_GetStorageIDs, tx)
 
-        val (dataContainer, payload, response) = readDataAndResponse(5000)
-        require(dataContainer.type == PtpCodes.CONTAINER_DATA) {
-            "GetStorageIDs expected DATA container"
-        }
+        val (payload, response) = readMaybeDataAndResponse(5000)
         require(response.type == PtpCodes.CONTAINER_RESPONSE) {
             "GetStorageIDs expected RESPONSE container"
         }
         require(response.code == PtpCodes.RC_OK) {
-            "GetStorageIDs failed with code=0x${response.code.toHex()}"
+            "GetStorageIDs failed with ${PtpCodes.responseName(response.code)}"
         }
-
-        if (payload.size < 4) {
+        if (payload == null || payload.size < 4) {
             debug("data: GetStorageIDs empty payload")
             return emptyList()
         }
@@ -379,41 +380,38 @@ class UsbPtpTransport(
     }
 
     fun configureSonySdioMode(): Boolean {
-        val step1Ok = runCatching {
-            transactNoDataCommand(
+        // Matches sequoia-ptpy Sony.session(): connect(1), connect(2),
+        // GetExtDeviceInfo, connect(3). All four must return OK.
+        val step1Ok = runSonySdioStep("SonySDIOConnect[1]") {
+            transactSonySdioRecv(
                 opCode = PtpCodes.OC_SonySdioConnect,
                 label = "SonySDIOConnect[1]",
                 params = intArrayOf(1, 0, 0)
             )
-        }.getOrElse { error ->
-            debug("sony: SDIOConnect step 1 failed: ${error.message}")
-            false
         }
-        val step2Ok = runCatching {
-            transactNoDataCommand(
+        pauseSonySdio()
+        val step2Ok = runSonySdioStep("SonySDIOConnect[2]") {
+            transactSonySdioRecv(
                 opCode = PtpCodes.OC_SonySdioConnect,
                 label = "SonySDIOConnect[2]",
                 params = intArrayOf(2, 0, 0)
             )
-        }.getOrElse { error ->
-            debug("sony: SDIOConnect step 2 failed: ${error.message}")
-            false
         }
-        val extInfoOk = runCatching {
-            transactSonySdioGetExtDeviceInfo()
-        }.getOrElse { error ->
-            debug("sony: SDIOGetExtDeviceInfo failed: ${error.message}")
-            false
+        pauseSonySdio()
+        val extInfoOk = runSonySdioStep("SonySDIOGetExtDeviceInfo") {
+            transactSonySdioRecv(
+                opCode = PtpCodes.OC_SonySdioGetExtDeviceInfo,
+                label = "SonySDIOGetExtDeviceInfo",
+                params = intArrayOf(PtpCodes.SONY_EXT_DEVICE_INFO_VERSION)
+            )
         }
-        val step3Ok = runCatching {
-            transactNoDataCommand(
+        pauseSonySdio()
+        val step3Ok = runSonySdioStep("SonySDIOConnect[3]") {
+            transactSonySdioRecv(
                 opCode = PtpCodes.OC_SonySdioConnect,
                 label = "SonySDIOConnect[3]",
                 params = intArrayOf(3, 0, 0)
             )
-        }.getOrElse { error ->
-            debug("sony: SDIOConnect step 3 failed: ${error.message}")
-            false
         }
         val configured = step1Ok && step2Ok && extInfoOk && step3Ok
         debug("sony: sdio-mode configured=$configured")
@@ -568,18 +566,29 @@ class UsbPtpTransport(
         return output.toByteArray()
     }
 
-    private fun transactSonySdioGetExtDeviceInfo(): Boolean {
+    private fun runSonySdioStep(label: String, block: () -> Boolean): Boolean {
+        return runCatching(block).getOrElse { error ->
+            debug("sony: $label failed: ${error.message}")
+            false
+        }
+    }
+
+    private fun pauseSonySdio() {
+        Thread.sleep(150)
+    }
+
+    private fun transactSonySdioRecv(
+        opCode: Int,
+        label: String,
+        params: IntArray
+    ): Boolean {
         val tx = nextTxId()
-        debug("cmd: SonySDIOGetExtDeviceInfo tx=$tx")
-        sendCommand(
-            PtpCodes.OC_SonySdioGetExtDeviceInfo,
-            tx,
-            intArrayOf(PtpCodes.SONY_EXT_DEVICE_INFO_VERSION)
-        )
+        debug("cmd: $label tx=$tx")
+        sendCommand(opCode, tx, params)
         val (payload, response) = readMaybeDataAndResponse(5000)
         val ok = response.type == PtpCodes.CONTAINER_RESPONSE && response.code == PtpCodes.RC_OK
         debug(
-            "rsp: SonySDIOGetExtDeviceInfo tx=$tx code=0x${response.code.toHex()} " +
+            "rsp: $label tx=$tx code=${PtpCodes.responseName(response.code)} " +
                 "ok=$ok payload=${payload?.size ?: 0}"
         )
         return ok

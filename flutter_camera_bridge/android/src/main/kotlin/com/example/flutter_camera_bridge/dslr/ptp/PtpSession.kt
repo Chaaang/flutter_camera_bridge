@@ -4,6 +4,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
@@ -30,6 +31,7 @@ class PtpSession(
     private val announcedHandles = Collections.synchronizedSet(mutableSetOf<Int>())
     private val commandQueue = Channel<suspend () -> Unit>(Channel.UNLIMITED)
     private val objectInfoCache = Collections.synchronizedMap(mutableMapOf<Int, PtpObjectInfo>())
+    private val ready = CompletableDeferred<Unit>()
 
     fun start() {
         if (!running.compareAndSet(false, true)) {
@@ -55,7 +57,8 @@ class PtpSession(
                 when (vendorProfile) {
                     CameraVendorProfile.SonySdio -> {
                         enqueueCommand("ConfigureSonySdioMode") {
-                            transport.configureSonySdioMode()
+                            val configured = transport.configureSonySdioMode()
+                            require(configured) { "Sony SDIO authentication failed" }
                         }
                         pauseBetweenUsbOperations()
                     }
@@ -73,9 +76,12 @@ class PtpSession(
                     }
                     pauseBetweenUsbOperations()
                 }
+                markReady()
+                onDebug("session: ready")
                 bootstrapKnownHandles()
                 eventLoop()
             } catch (t: Throwable) {
+                failReady(t)
                 onError(t)
             }
         }
@@ -83,11 +89,16 @@ class PtpSession(
 
     fun stop() {
         running.set(false)
+        failReady(CancellationException("session stopped"))
         commandQueue.close()
         scope.cancel()
         runCatching { transport.closeSession() }
         runCatching { transport.close() }
         onDebug("session: stopped")
+    }
+
+    suspend fun awaitReady() {
+        ready.await()
     }
 
     private suspend fun eventLoop() {
@@ -188,6 +199,7 @@ class PtpSession(
     }
 
     suspend fun listImages(): List<Map<String, Any?>> {
+        awaitReady()
         val storageIds = enqueueCommand("GetStorageIDs[listImages]") {
             transport.getStorageIds()
         }
@@ -229,15 +241,25 @@ class PtpSession(
     }
 
     suspend fun getThumbnailBytes(handle: Int): ByteArray {
+        awaitReady()
         return enqueueCommand("GetThumb[$handle]") {
             transport.getThumbBytes(handle)
         }
     }
 
     suspend fun getImageBytes(handle: Int): ByteArray {
+        awaitReady()
         return enqueueCommand("GetObjectBytes[$handle]") {
             transport.getObjectBytes(handle)
         }
+    }
+
+    private fun markReady() {
+        ready.complete(Unit)
+    }
+
+    private fun failReady(error: Throwable) {
+        ready.completeExceptionally(error)
     }
 
     private suspend fun pauseBetweenUsbOperations() {
