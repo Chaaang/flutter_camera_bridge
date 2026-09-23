@@ -24,6 +24,7 @@ class UsbPtpTransport(
     private var bulkOut: UsbEndpoint? = null
     private var interruptIn: UsbEndpoint? = null
     private val txId = AtomicInteger(1)
+    private var bulkInPending = ByteArray(0)
 
     fun open() {
         debug("open: vendor=0x${device.vendorId.toHex()} product=0x${device.productId.toHex()}")
@@ -56,6 +57,7 @@ class UsbPtpTransport(
         requireNotNull(bulkIn) { "Bulk IN endpoint missing" }
         requireNotNull(bulkOut) { "Bulk OUT endpoint missing" }
         requireNotNull(interruptIn) { "Interrupt IN endpoint missing" }
+        bulkInPending = ByteArray(0)
         debug("open: endpoints ready bulkIn=${bulkIn?.maxPacketSize} bulkOut=${bulkOut?.maxPacketSize} intIn=${interruptIn?.maxPacketSize}")
     }
 
@@ -72,27 +74,20 @@ class UsbPtpTransport(
         bulkIn = null
         bulkOut = null
         interruptIn = null
+        bulkInPending = ByteArray(0)
     }
 
     fun nextTxId(): Int = txId.getAndIncrement()
 
     fun openSession(sessionId: Int = 1) {
-        // PTP requires TransactionID 0 for OpenSession (same as sequoia-ptpy).
-        val tx = 0
-        debug("cmd: OpenSession tx=$tx sessionId=$sessionId")
-        sendCommand(PtpCodes.OC_OpenSession, tx, intArrayOf(sessionId))
-        val response = readResponse(5000)
-        debug("rsp: OpenSession tx=$tx code=0x${response.code.toHex()} type=${response.type}")
-        if (response.code == PtpCodes.RC_SessionAlreadyOpen) {
-            debug("rsp: OpenSession already open")
-            return
-        }
-        require(response.code == PtpCodes.RC_OK) {
-            "OpenSession failed with ${PtpCodes.responseName(response.code)}"
-        }
+        // Working Sony traces use transaction 1. Fall back to 0 if the body rejects it.
+        val opened = tryOpenSession(tx = 1, sessionId = sessionId)
+        txId.set(2)
+        if (opened) return
+        require(tryOpenSession(tx = 0, sessionId = sessionId)) { "OpenSession failed" }
     }
 
-    fun getDeviceInfoSummary(): String {
+    fun getDeviceInfo(): PtpDeviceInfo {
         val tx = nextTxId()
         debug("cmd: GetDeviceInfo tx=$tx")
         sendCommand(PtpCodes.OC_GetDeviceInfo, tx)
@@ -105,23 +100,38 @@ class UsbPtpTransport(
             "GetDeviceInfo expected RESPONSE container"
         }
         require(response.code == PtpCodes.RC_OK) {
-            "GetDeviceInfo failed with code=0x${response.code.toHex()}"
+            "GetDeviceInfo failed with ${PtpCodes.responseName(response.code)}"
         }
 
-        val standardVersion = if (payload.size >= 2) {
-            leShort(payload, 0).toInt() and 0xFFFF
-        } else {
-            -1
+        val info = parseDeviceInfo(payload)
+        debug("data: GetDeviceInfo tx=$tx ${info.summary}")
+        return info
+    }
+
+    fun getDeviceInfoSummary(): String = getDeviceInfo().summary
+
+    fun prepareVendorSession(profile: CameraVendorProfile) {
+        val info = runCatching { getDeviceInfo() }.getOrElse { error ->
+            debug("device: GetDeviceInfo failed ${error.message}")
+            if (profile == CameraVendorProfile.CanonEos) {
+                configureCanonEosMode()
+            }
+            return
         }
-        val vendorExtensionId = if (payload.size >= 6) {
-            leInt(payload, 2)
-        } else {
-            -1
+        debug("device: ${info.summary}")
+        when (profile) {
+            CameraVendorProfile.CanonEos -> configureCanonEosMode()
+            CameraVendorProfile.SonySdio -> {
+                if (info.supportsSonySdio) {
+                    val configured = configureSonySdioMode()
+                    debug("sony: sdio-mode configured=$configured")
+                    enableSonyPcControl()
+                } else {
+                    debug("sony: SDIO opcodes not advertised; using standard PTP")
+                }
+            }
+            CameraVendorProfile.Standard -> Unit
         }
-        val summary =
-            "standardVersion=$standardVersion vendorExtensionId=0x${vendorExtensionId.toHex()} payload=${payload.size}"
-        debug("data: GetDeviceInfo tx=$tx $summary")
-        return summary
     }
 
     fun closeSession() {
@@ -233,6 +243,18 @@ class UsbPtpTransport(
     }
 
     fun getStorageIds(): List<Int> {
+        val first = runCatching { getStorageIdsOnce() }
+        if (first.isSuccess) return first.getOrThrow()
+        val error = first.exceptionOrNull() ?: return emptyList()
+        if (device.vendorId != 0x054C || !isSonyStorageRetry(error)) throw error
+
+        debug("sony: GetStorageIDs failed (${error.message}); enabling PC control and retrying")
+        runCatching { configureSonySdioMode() }
+        runCatching { enableSonyPcControl() }
+        return getStorageIdsOnce()
+    }
+
+    private fun getStorageIdsOnce(): List<Int> {
         val tx = nextTxId()
         debug("cmd: GetStorageIDs tx=$tx")
         sendCommand(PtpCodes.OC_GetStorageIDs, tx)
@@ -418,6 +440,26 @@ class UsbPtpTransport(
         return configured
     }
 
+    fun enableSonyPcControl() {
+        val priorityOk = runCatching {
+            transactSendData(
+                opCode = PtpCodes.OC_SonySetControlDeviceA,
+                label = "SonySetPriorityMode",
+                params = intArrayOf(PtpCodes.DPC_SonyPriorityMode),
+                payload = byteArrayOf(1)
+            )
+        }.getOrDefault(false)
+        pauseSonySdio()
+        val transferOk = runCatching {
+            transactSonySdioRecv(
+                opCode = PtpCodes.OC_SonySetContentsTransferMode,
+                label = "SonySetContentsTransferMode",
+                params = intArrayOf(1)
+            )
+        }.getOrDefault(false)
+        debug("sony: pc-control priority=$priorityOk contentsTransfer=$transferOk")
+    }
+
     fun pollCanonEosEvents(): List<CanonEosEvent> {
         val tx = nextTxId()
         debug("cmd: EOSGetEvent tx=$tx")
@@ -454,26 +496,38 @@ class UsbPtpTransport(
 
     private fun readRawContainer(endpoint: UsbEndpoint, timeoutMs: Int): ByteArray {
         val conn = requireNotNull(connection)
-        val initial = ByteArray(1024)
-        val initialRead = conn.bulkTransfer(endpoint, initial, initial.size, timeoutMs)
-        require(initialRead >= 12) { "Container header unavailable ($initialRead)" }
-
-        val totalLen = leInt(initial, 0)
-        val all = ByteArray(totalLen)
-        val copied = minOf(initialRead, totalLen)
-        System.arraycopy(initial, 0, all, 0, copied)
-
-        var offset = copied
-        val chunk = ByteArray(16 * 1024)
-        while (offset < totalLen) {
-            val request = minOf(chunk.size, totalLen - offset)
-            val read = conn.bulkTransfer(endpoint, chunk, request, timeoutMs)
-            require(read > 0) { "Container read interrupted at $offset/$totalLen" }
-            System.arraycopy(chunk, 0, all, offset, read)
-            offset += read
+        val collected = ByteArrayOutputStream()
+        if (bulkInPending.isNotEmpty()) {
+            collected.write(bulkInPending)
+            bulkInPending = ByteArray(0)
         }
 
-        return all
+        val chunk = ByteArray(16 * 1024)
+        var zeroLengthPackets = 0
+        fun fillUntil(size: Int) {
+            while (collected.size() < size) {
+                val read = conn.bulkTransfer(endpoint, chunk, chunk.size, timeoutMs)
+                if (read == 0) {
+                    zeroLengthPackets += 1
+                    require(zeroLengthPackets <= 3) { "Too many zero-length USB packets" }
+                    continue
+                }
+                require(read > 0) { "Container read interrupted (${collected.size()}/$size)" }
+                zeroLengthPackets = 0
+                collected.write(chunk, 0, read)
+            }
+        }
+
+        fillUntil(12)
+        var all = collected.toByteArray()
+        val totalLen = leInt(all, 0)
+        require(totalLen in 12..64_000_000) { "Invalid container length $totalLen" }
+        fillUntil(totalLen)
+        all = collected.toByteArray()
+        if (all.size > totalLen) {
+            bulkInPending = all.copyOfRange(totalLen, all.size)
+        }
+        return all.copyOf(totalLen)
     }
 
     private fun readDataAndResponse(timeoutMs: Int): Triple<PtpContainer, ByteArray, PtpContainer> {
@@ -527,43 +581,23 @@ class UsbPtpTransport(
         debug("cmd: $label tx=$tx handle=0x${handle.toHex()}")
         sendCommand(opCode, tx, intArrayOf(handle))
 
-        val conn = requireNotNull(connection)
         val endpoint = requireNotNull(bulkIn)
-        val firstChunk = ByteArray(16 * 1024)
-        val firstCount = conn.bulkTransfer(endpoint, firstChunk, firstChunk.size, 10_000)
-        require(firstCount >= 12) { "$label first transfer failed ($firstCount)" }
-
-        val totalLen = leInt(firstChunk, 0)
-        val containerType = leShort(firstChunk, 4).toInt() and 0xFFFF
-        require(containerType == PtpCodes.CONTAINER_DATA) {
-            "$label expected DATA container, got type=$containerType"
+        val raw = readRawContainer(endpoint, 10_000)
+        val container = parseContainer(raw)
+        require(container.type == PtpCodes.CONTAINER_DATA) {
+            "$label expected DATA container, got type=${container.type} code=${PtpCodes.responseName(container.code)}"
         }
-
-        val output = ByteArrayOutputStream((totalLen - 12).coerceAtLeast(0))
-        val firstPayload = firstCount - 12
-        if (firstPayload > 0) {
-            output.write(firstChunk, 12, firstPayload)
-        }
-
-        var remaining = totalLen - 12 - firstPayload
-        val chunk = ByteArray(32 * 1024)
-        while (remaining > 0) {
-            val request = minOf(chunk.size, remaining)
-            val read = conn.bulkTransfer(endpoint, chunk, request, 10_000)
-            require(read > 0) { "$label interrupted while reading handle=$handle remaining=$remaining" }
-            output.write(chunk, 0, read)
-            remaining -= read
-        }
+        val payload = if (raw.size > 12) raw.copyOfRange(12, raw.size) else ByteArray(0)
 
         val response = readResponse(5000)
         require(response.type == PtpCodes.CONTAINER_RESPONSE) {
             "$label expected RESPONSE container"
         }
         require(response.code == PtpCodes.RC_OK) {
-            "$label failed with code 0x${response.code.toHex()}"
+            "$label failed with ${PtpCodes.responseName(response.code)}"
         }
-        debug("data: $label tx=$tx handle=0x${handle.toHex()} bytes=${output.size()}")
-        return output.toByteArray()
+        debug("data: $label tx=$tx handle=0x${handle.toHex()} bytes=${payload.size}")
+        return payload
     }
 
     private fun runSonySdioStep(label: String, block: () -> Boolean): Boolean {
@@ -592,6 +626,97 @@ class UsbPtpTransport(
                 "ok=$ok payload=${payload?.size ?: 0}"
         )
         return ok
+    }
+
+    private fun tryOpenSession(tx: Int, sessionId: Int): Boolean {
+        return runCatching {
+            debug("cmd: OpenSession tx=$tx sessionId=$sessionId")
+            sendCommand(PtpCodes.OC_OpenSession, tx, intArrayOf(sessionId))
+            val response = readResponse(5000)
+            debug("rsp: OpenSession tx=$tx code=${PtpCodes.responseName(response.code)}")
+            response.code == PtpCodes.RC_OK || response.code == PtpCodes.RC_SessionAlreadyOpen
+        }.getOrElse { error ->
+            debug("OpenSession tx=$tx failed: ${error.message}")
+            false
+        }
+    }
+
+    private fun isSonyStorageRetry(error: Throwable): Boolean {
+        val message = error.message ?: return false
+        return message.contains("SessionNotOpen") ||
+            message.contains("DeviceBusy") ||
+            message.contains("OperationNotSupported") ||
+            message.contains("StoreNotAvailable")
+    }
+
+    private fun transactSendData(
+        opCode: Int,
+        label: String,
+        params: IntArray,
+        payload: ByteArray
+    ): Boolean {
+        val tx = nextTxId()
+        debug("cmd: $label tx=$tx")
+        sendCommand(opCode, tx, params)
+        val length = 12 + payload.size
+        val container = ByteBuffer.allocate(length).order(ByteOrder.LITTLE_ENDIAN)
+        container.putInt(length)
+        container.putShort(PtpCodes.CONTAINER_DATA.toShort())
+        container.putShort(opCode.toShort())
+        container.putInt(tx)
+        container.put(payload)
+        writeBulk(container.array(), 3000)
+        val response = readResponse(5000)
+        val ok = response.type == PtpCodes.CONTAINER_RESPONSE && response.code == PtpCodes.RC_OK
+        debug("rsp: $label tx=$tx code=${PtpCodes.responseName(response.code)} ok=$ok")
+        return ok
+    }
+
+    private fun parseDeviceInfo(payload: ByteArray): PtpDeviceInfo {
+        if (payload.size < 8) {
+            return PtpDeviceInfo(
+                standardVersion = -1,
+                vendorExtensionId = -1,
+                manufacturer = "",
+                model = "",
+                operations = emptySet()
+            )
+        }
+        var offset = 0
+        val standardVersion = leShort(payload, offset).toInt() and 0xFFFF
+        offset += 2
+        val vendorExtensionId = leInt(payload, offset)
+        offset += 4
+        offset += 2
+        offset = readPtpString(payload, offset).second
+        if (offset + 2 <= payload.size) offset += 2
+        val (operations, afterOps) = readUint16Array(payload, offset)
+        offset = afterOps
+        repeat(4) {
+            offset = readUint16Array(payload, offset).second
+        }
+        val (manufacturer, afterManufacturer) = readPtpString(payload, offset)
+        val (model, _) = readPtpString(payload, afterManufacturer)
+        return PtpDeviceInfo(
+            standardVersion = standardVersion,
+            vendorExtensionId = vendorExtensionId,
+            manufacturer = manufacturer,
+            model = model,
+            operations = operations.toSet()
+        )
+    }
+
+    private fun readUint16Array(data: ByteArray, offset: Int): Pair<List<Int>, Int> {
+        if (offset + 4 > data.size) return emptyList<Int>() to data.size
+        val count = leInt(data, offset).coerceIn(0, 4096)
+        var pos = offset + 4
+        val values = ArrayList<Int>(count)
+        repeat(count) {
+            if (pos + 2 > data.size) return values to data.size
+            values.add(leShort(data, pos).toInt() and 0xFFFF)
+            pos += 2
+        }
+        return values to pos
     }
 
     private fun transactNoDataCommand(

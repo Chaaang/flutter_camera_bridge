@@ -54,28 +54,10 @@ class PtpSession(
                 }
                 onDebug("session: opened")
                 pauseBetweenUsbOperations()
-                when (vendorProfile) {
-                    CameraVendorProfile.SonySdio -> {
-                        enqueueCommand("ConfigureSonySdioMode") {
-                            val configured = transport.configureSonySdioMode()
-                            require(configured) { "Sony SDIO authentication failed" }
-                        }
-                        pauseBetweenUsbOperations()
-                    }
-                    CameraVendorProfile.CanonEos,
-                    CameraVendorProfile.Standard -> Unit
+                enqueueCommand("PrepareVendorSession") {
+                    transport.prepareVendorSession(vendorProfile)
                 }
-                val deviceInfo = enqueueCommand("GetDeviceInfo") {
-                    transport.getDeviceInfoSummary()
-                }
-                onDebug("device: $deviceInfo")
                 pauseBetweenUsbOperations()
-                if (vendorProfile == CameraVendorProfile.CanonEos) {
-                    enqueueCommand("ConfigureCanonEosMode") {
-                        transport.configureCanonEosMode()
-                    }
-                    pauseBetweenUsbOperations()
-                }
                 markReady()
                 onDebug("session: ready")
                 bootstrapKnownHandles()

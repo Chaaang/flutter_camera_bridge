@@ -21,6 +21,9 @@ object PtpCodes {
 
     const val OC_SonySdioConnect = 0x9201
     const val OC_SonySdioGetExtDeviceInfo = 0x9202
+    const val OC_SonySetControlDeviceA = 0x9205
+    const val OC_SonySetContentsTransferMode = 0x9212
+    const val DPC_SonyPriorityMode = 0xD25A
 
     const val RC_OK = 0x2001
     const val RC_GeneralError = 0x2002
@@ -38,6 +41,7 @@ object PtpCodes {
             RC_OperationNotSupported -> "OperationNotSupported"
             RC_DeviceBusy -> "DeviceBusy"
             RC_SessionAlreadyOpen -> "SessionAlreadyOpen"
+            0x2013 -> "StoreNotAvailable"
             else -> "Unknown"
         }
         return "$hex ($name)"

@@ -23,6 +23,24 @@ data class CanonEosEvent(
     val handle: Int?
 )
 
+data class PtpDeviceInfo(
+    val standardVersion: Int,
+    val vendorExtensionId: Int,
+    val manufacturer: String,
+    val model: String,
+    val operations: Set<Int>
+) {
+    val supportsSonySdio: Boolean
+        get() = operations.contains(PtpCodes.OC_SonySdioConnect) ||
+            operations.contains(PtpCodes.OC_SonySdioGetExtDeviceInfo) ||
+            vendorExtensionId == 0x11
+
+    val summary: String
+        get() = "standardVersion=$standardVersion " +
+            "vendorExtensionId=0x${vendorExtensionId.toString(16)} " +
+            "manufacturer=$manufacturer model=$model ops=${operations.size}"
+}
+
 enum class CameraVendorProfile {
     CanonEos,
     SonySdio,

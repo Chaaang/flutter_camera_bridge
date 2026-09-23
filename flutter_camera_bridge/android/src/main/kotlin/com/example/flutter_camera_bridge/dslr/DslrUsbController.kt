@@ -462,20 +462,10 @@ class DslrUsbController(
                 pauseBetweenUsbOperations()
                 transport.openSession(1)
                 pauseBetweenUsbOperations()
-                when (CameraVendorProfile.forVendorId(device.vendorId)) {
-                    CameraVendorProfile.CanonEos -> {
-                        emitDebug("canon: configuring EOS mode")
-                        transport.configureCanonEosMode()
-                        pauseBetweenUsbOperations()
-                    }
-                    CameraVendorProfile.SonySdio -> {
-                        emitDebug("sony: configuring SDIO mode")
-                        val configured = transport.configureSonySdioMode()
-                        require(configured) { "Sony SDIO authentication failed" }
-                        pauseBetweenUsbOperations()
-                    }
-                    CameraVendorProfile.Standard -> Unit
-                }
+                transport.prepareVendorSession(
+                    CameraVendorProfile.forVendorId(device.vendorId)
+                )
+                pauseBetweenUsbOperations()
                 block(transport)
             } finally {
                 runCatching { transport.closeSession() }
